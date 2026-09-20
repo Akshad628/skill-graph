@@ -78,6 +78,26 @@ class TestSkillExtraction:
         assert get_skill_category("Pandas") == "Data"
         assert get_skill_category("UnknownSkill") == "Other"
 
+    def test_alias_normalization(self):
+        """Should normalize aliases like React.js -> React and Postgres -> PostgreSQL."""
+        text = "Built web apps with React.js, Node.js, and Postgres databases."
+        skills, _ = extract_skills(text)
+        assert "React" in skills
+        assert "Node.js" in skills
+        assert "PostgreSQL" in skills
+
+    def test_extract_skills_and_evidence(self):
+        """Should extract explicit skills alongside action evidence."""
+        from skill_extractor import extract_skills_and_evidence
+        text = "Built a FastAPI backend with PostgreSQL and REST APIs."
+        result = extract_skills_and_evidence(text)
+        assert "FastAPI" in result["explicit_skills"]
+        assert "PostgreSQL" in result["explicit_skills"]
+        assert len(result["evidence_items"]) > 0
+        evidence = result["evidence_items"][0]
+        assert "built" in evidence["actions"]
+        assert "FastAPI" in evidence["skills"]
+
 
 # GRAPH BUILDER TESTS
 class TestGraphBuilder:
