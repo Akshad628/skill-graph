@@ -11,6 +11,7 @@ CATEGORY_COLORS = {
     "Data": "#F59E0B",  # Amber
     "DevOps": "#8B5CF6",  # Purple
     "Databases": "#EC4899",  # Pink
+    "Inferred Capability": "#D97706", # Golden amber for inferred capability nodes
     "Other": "#6B7280"  # Gray
 }
 
@@ -144,25 +145,40 @@ def plot_graph(G: nx.Graph,
         node_names.append(node)
 
         # Build hover text
+        node_data = G.nodes[node]
+        is_inferred = node_data.get("node_type") == "inferred"
         neighbors = list(G.neighbors(node))
         degree = G.degree(node)
-        hover_text = f"<b>{node}</b><br>"
-        hover_text += f"Connections: {degree}<br>"
-        if neighbors:
-            hover_text += f"Connected to: {', '.join(neighbors[:5])}"
-            if len(neighbors) > 5:
-                hover_text += f", +{len(neighbors) - 5} more"
+
+        if is_inferred:
+            conf = node_data.get("confidence", 0.0)
+            evidence = node_data.get("evidence", [])
+            hover_text = f"<b>{node}</b> [INFERRED CAPABILITY]<br>"
+            hover_text += f"Inference Confidence: {conf:.0%}<br>"
+            if evidence:
+                hover_text += f"Supported by: {', '.join(evidence[:6])}<br>"
+            hover_text += f"Connections: {degree}"
+        else:
+            hover_text = f"<b>{node}</b> [EXPLICIT SKILL]<br>"
+            hover_text += f"Connections: {degree}<br>"
+            if neighbors:
+                hover_text += f"Connected to: {', '.join(neighbors[:5])}"
+                if len(neighbors) > 5:
+                    hover_text += f", +{len(neighbors) - 5} more"
         node_text.append(hover_text)
 
-        # Color: missing skills = red, else by category
+        # Color: missing skills = red, inferred = special amber, else by category
         if node in missing_skills:
             node_colors.append("red")
+        elif is_inferred:
+            node_colors.append(CATEGORY_COLORS["Inferred Capability"])
         else:
             category = CATEGORY_MAP.get(node, "Other")
             node_colors.append(CATEGORY_COLORS.get(category, "gray"))
 
         # Size proportional to degree (connectivity)
-        node_sizes.append(15 + 8 * G.degree(node))
+        base_size = 20 if is_inferred else 15
+        node_sizes.append(base_size + 8 * G.degree(node))
 
     node_trace = go.Scatter(
         x=node_x, y=node_y,

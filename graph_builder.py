@@ -1,5 +1,5 @@
 import logging
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional, Any
 import networkx as nx
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -42,40 +42,59 @@ SKILL_RELATIONSHIPS = [
     ("Kubernetes", "DevOps", 0.95),
 ]
 
-def build_skill_graph(skills: List[str], similarity_threshold: float = 0.3) -> nx.Graph:
+def build_skill_graph(
+    skills: List[str],
+    similarity_threshold: float = 0.3,
+    inferred_skills: Optional[List[Dict[str, Any]]] = None
+) -> nx.Graph:
     """
-    Build a skill relationship graph using semantic similarity + domain knowledge.
+    Build a skill relationship graph using semantic similarity, domain knowledge,
+    and evidence-based capability links.
 
     Time Complexity: O(n^2) where n = number of skills
     Space Complexity: O(n^2) for similarity matrix
 
     Args:
-        skills: List of extracted skills
+        skills: List of extracted explicit skills
         similarity_threshold: Minimum similarity score for edge creation
+        inferred_skills: Optional list of inferred capability objects with supporting evidence
 
     Returns:
         NetworkX graph with skill nodes and relationships
     """
-    if not skills:
+    if not skills and not inferred_skills:
         return nx.Graph()
 
     G = nx.Graph()
+    inferred_skills = inferred_skills or []
 
-    # Add all nodes
+    # Add all explicit nodes
     for skill in skills:
-        G.add_node(skill)
+        G.add_node(skill, node_type="explicit")
+
+    # Add inferred nodes
+    for inf in inferred_skills:
+        inf_name = inf["skill"]
+        G.add_node(
+            inf_name,
+            node_type="inferred",
+            confidence=inf.get("confidence", 0.8),
+            evidence=inf.get("evidence", [])
+        )
+
+    all_nodes = list(G.nodes())
 
     # Strategy 1: Semantic similarity using embeddings
     try:
-        if model:
-            embeddings = model.encode(skills)
+        if model and all_nodes:
+            embeddings = model.encode(all_nodes)
             similarity_matrix = cosine_similarity(embeddings)
 
-            for i, skill_a in enumerate(skills):
-                for j in range(i + 1, len(skills)):
+            for i, skill_a in enumerate(all_nodes):
+                for j in range(i + 1, len(all_nodes)):
                     score = float(similarity_matrix[i][j])
                     if score >= similarity_threshold:
-                        G.add_edge(skill_a, skills[j],
+                        G.add_edge(skill_a, all_nodes[j],
                                    weight=score,
                                    source="semantic")
         else:
@@ -86,7 +105,7 @@ def build_skill_graph(skills: List[str], similarity_threshold: float = 0.3) -> n
     # Strategy 2: Domain-specific relationships
     try:
         for skill_a, skill_b, weight in SKILL_RELATIONSHIPS:
-            if skill_a in skills and skill_b in skills:
+            if skill_a in all_nodes and skill_b in all_nodes:
                 # Add or update edge (prefer domain knowledge)
                 if G.has_edge(skill_a, skill_b):
                     # Keep highest weight
@@ -96,6 +115,17 @@ def build_skill_graph(skills: List[str], similarity_threshold: float = 0.3) -> n
                     G.add_edge(skill_a, skill_b, weight=weight, source="domain")
     except Exception as e:
         logger.error(f"Error in domain relationships: {e}")
+
+    # Strategy 3: Connect explicit skills to the capabilities they provide evidence for
+    try:
+        for inf in inferred_skills:
+            inf_name = inf["skill"]
+            for ev_skill in inf.get("evidence", []):
+                if ev_skill in G.nodes():
+                    # High confidence evidence link
+                    G.add_edge(ev_skill, inf_name, weight=0.92, source="evidence_support")
+    except Exception as e:
+        logger.error(f"Error connecting inferred skills to evidence: {e}")
 
     return G
 

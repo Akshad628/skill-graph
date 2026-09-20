@@ -5,7 +5,8 @@ import pdfplumber
 import docx
 import streamlit as st
 from graph_builder import build_skill_graph, compute_graph_metrics, get_skill_recommendations
-from skill_extractor import extract_skills, get_skill_category
+from skill_extractor import extract_skills, extract_skills_and_evidence, get_skill_category
+from hidden_skill_inference import infer_hidden_skills
 from visualise import plot_graph, create_skill_summary_chart
 
 # Configure logging
@@ -174,12 +175,15 @@ if st.button("Generate Skill Graph", use_container_width=True, type="primary"):
     if not text_input.strip():
         st.warning("Please enter some text to extract skills.")
     else:
-        with st.spinner("Analysing skills..."):
+        with st.spinner("Analysing skills and discovering evidence-backed capabilities..."):
             start_time = time.time()
 
-            # Extract skills
+            # Extract explicit skills and contextual evidence
             try:
-                skills, confidence_scores = extract_skills(text_input)
+                extraction_result = extract_skills_and_evidence(text_input)
+                skills = extraction_result["explicit_skills"]
+                confidence_scores = extraction_result["confidence_scores"]
+                evidence_items = extraction_result["evidence_items"]
             except Exception as e:
                 st.error(f"Error extracting skills: {e}")
                 logger.error(f"Skill extraction failed: {e}")
@@ -188,9 +192,24 @@ if st.button("Generate Skill Graph", use_container_width=True, type="primary"):
             if not skills:
                 st.warning("No skills found in the text. Try adding technical terms.")
             else:
-                # Build graph
+                # Infer hidden capabilities supported by evidence
                 try:
-                    G = build_skill_graph(skills, similarity_threshold)
+                    inferred_skills = infer_hidden_skills(
+                        skills,
+                        evidence_items,
+                        raw_text=text_input
+                    )
+                except Exception as e:
+                    logger.error(f"Error inferring hidden skills: {e}")
+                    inferred_skills = []
+
+                # Build graph with explicit skills and inferred capabilities
+                try:
+                    G = build_skill_graph(
+                        skills,
+                        similarity_threshold=similarity_threshold,
+                        inferred_skills=inferred_skills
+                    )
                 except Exception as e:
                     st.error(f"Error building graph: {e}")
                     logger.error(f"Graph building failed: {e}")
@@ -198,10 +217,12 @@ if st.button("Generate Skill Graph", use_container_width=True, type="primary"):
 
                 execution_time = time.time() - start_time
 
-                # === DISPLAY RESULTS ===
+                # === DISPLAY SUMMARY ===
                 st.markdown(f"""
                     <div class="success-box">
-                    Extracted <b>{len(skills)} skills</b> &nbsp;&middot;&nbsp; Processing time: {execution_time:.2f}s
+                    Extracted <b>{len(skills)} explicit skills</b> &nbsp;&middot;&nbsp; 
+                    Discovered <b>{len(inferred_skills)} evidence-backed hidden capabilities</b> &nbsp;&middot;&nbsp; 
+                    Processing time: {execution_time:.2f}s
                     </div>
                 """, unsafe_allow_html=True)
 
@@ -210,13 +231,34 @@ if st.button("Generate Skill Graph", use_container_width=True, type="primary"):
                 fig_confidence = create_skill_summary_chart(skills, confidence_scores)
                 st.plotly_chart(fig_confidence, use_container_width=True)
 
+                # === EVIDENCE-BASED HIDDEN SKILLS PANEL ===
+                st.subheader("Discovered Hidden Skills (Evidence-Backed Capabilities)")
+                st.markdown("*Capabilities not explicitly claimed as skills, but demonstrably evidenced by candidate project work, tools, and technical actions.*")
+
+                if inferred_skills:
+                    for inf in inferred_skills:
+                        with st.expander(f"**{inf['skill']}**  (Inference Confidence: {inf['confidence']:.0%})", expanded=True):
+                            col_a, col_b = st.columns([1, 1])
+                            with col_a:
+                                st.markdown("**Supporting Explicit Technologies:**")
+                                st.write(", ".join(inf["evidence"]))
+                                if inf.get("action_evidence"):
+                                    st.markdown("**Demonstrated Technical Actions:**")
+                                    st.write(", ".join(inf["action_evidence"]))
+                            with col_b:
+                                if inf.get("source_context"):
+                                    st.markdown("**Contextual CV Evidence Snippet:**")
+                                    st.caption(f'"{inf["source_context"]}"')
+                else:
+                    st.info("No higher-level capabilities met the evidence threshold for this profile.")
+
                 # Metrics
                 st.subheader("Graph Metrics")
                 metrics = compute_graph_metrics(G)
 
                 col1, col2, col3, col4, col5 = st.columns(5)
                 with col1:
-                    st.metric("Total Skills", metrics.get("num_nodes", 0))
+                    st.metric("Total Nodes", metrics.get("num_nodes", 0))
                 with col2:
                     st.metric("Connections", metrics.get("num_edges", 0))
                 with col3:
@@ -225,15 +267,18 @@ if st.button("Generate Skill Graph", use_container_width=True, type="primary"):
                     st.metric("Avg Degree", f"{metrics.get('avg_degree', 0):.1f}")
                 with col5:
                     top_skill = metrics.get("top_skill", "N/A")
-                    st.metric("Most Central Skill", top_skill)
+                    st.metric("Most Central Node", top_skill)
 
                 # Main graph visualisation
                 st.subheader("Skill Relationship Network")
 
                 missing_skills = []
+                inferred_skill_names = {inf["skill"] for inf in inferred_skills}
+                all_profile_skills = set(skills) | inferred_skill_names
+
                 if selected_role != "None":
                     role_skills = set(job_roles[selected_role])
-                    missing_skills = list(role_skills - set(skills))
+                    missing_skills = list(role_skills - all_profile_skills)
 
                 fig = plot_graph(G, missing_skills,
                                  title=f"Skill Graph{f'  --  {selected_role}' if selected_role != 'None' else ''}")
@@ -244,38 +289,58 @@ if st.button("Generate Skill Graph", use_container_width=True, type="primary"):
                     st.subheader("Job Role Analysis")
 
                     role_skills = set(job_roles[selected_role])
-                    current_skills = set(skills)
-                    matched_skills = role_skills & current_skills
-                    missing = role_skills - current_skills
+                    explicit_set = set(skills)
+                    inferred_dict = {inf["skill"]: inf for inf in inferred_skills}
+                    inferred_set = set(inferred_dict.keys())
+
+                    # Capabilities in role satisfied explicitly vs inferred
+                    explicit_matches = role_skills & explicit_set
+                    inferred_matches = (role_skills - explicit_set) & inferred_set
+                    all_matches = explicit_matches | inferred_matches
+                    missing = role_skills - all_matches
 
                     # Comparison metrics
-                    match_pct = (len(matched_skills) / len(role_skills) * 100) if role_skills else 0
+                    match_pct = (len(all_matches) / len(role_skills) * 100) if role_skills else 0
+                    explicit_pct = (len(explicit_matches) / len(role_skills) * 100) if role_skills else 0
 
-                    col1, col2, col3 = st.columns(3)
+                    col1, col2, col3, col4 = st.columns(4)
                     with col1:
-                        st.metric("Skills Match", f"{match_pct:.0f}%")
+                        st.metric("Total Match", f"{match_pct:.0f}%")
                     with col2:
-                        st.metric("Matched", len(matched_skills))
+                        st.metric("Explicit Matches", len(explicit_matches))
                     with col3:
+                        st.metric("Inferred Matches", len(inferred_matches))
+                    with col4:
                         st.metric("Missing", len(missing))
 
                     st.progress(match_pct / 100)
 
-                    # Matched skills
-                    with st.expander("Matched Skills", expanded=True):
-                        matched_by_category = {}
-                        for skill in matched_skills:
-                            cat = get_skill_category(skill)
-                            if cat not in matched_by_category:
-                                matched_by_category[cat] = []
-                            matched_by_category[cat].append(skill)
+                    # Explicit Matched skills
+                    with st.expander(f"Explicit Matches ({len(explicit_matches)})", expanded=True):
+                        if explicit_matches:
+                            matched_by_category = {}
+                            for skill in explicit_matches:
+                                cat = get_skill_category(skill)
+                                if cat not in matched_by_category:
+                                    matched_by_category[cat] = []
+                                matched_by_category[cat].append(skill)
 
-                        for category in sorted(matched_by_category.keys()):
-                            st.markdown(f"**{category}**: {', '.join(sorted(matched_by_category[category]))}")
+                            for category in sorted(matched_by_category.keys()):
+                                st.markdown(f"**{category}**: {', '.join(sorted(matched_by_category[category]))}")
+                        else:
+                            st.write("None")
+
+                    # Inferred Matched capabilities
+                    if inferred_matches:
+                        with st.expander(f"Inferred Capability Matches ({len(inferred_matches)})", expanded=True):
+                            st.caption("These role requirements were not directly listed as skills, but the candidate demonstrated them through project evidence:")
+                            for inf_skill in sorted(inferred_matches):
+                                inf_obj = inferred_dict[inf_skill]
+                                st.markdown(f"- **{inf_skill}** (Confidence: {inf_obj['confidence']:.0%}) &mdash; Evidenced by: *{', '.join(inf_obj['evidence'])}*")
 
                     # Missing skills
                     if missing:
-                        with st.expander("Missing Skills", expanded=True):
+                        with st.expander(f"Missing Skills ({len(missing)})", expanded=True):
                             missing_by_category = {}
                             for skill in missing:
                                 cat = get_skill_category(skill)
@@ -294,7 +359,7 @@ if st.button("Generate Skill Graph", use_container_width=True, type="primary"):
                         st.subheader("Learning Recommendations")
 
                         try:
-                            recommendations = get_skill_recommendations(G, current_skills, role_skills)
+                            recommendations = get_skill_recommendations(G, all_matches, role_skills)
 
                             if recommendations:
                                 st.markdown("**Recommended order to learn (based on skill proximity in graph):**")
@@ -336,15 +401,18 @@ if st.button("Generate Skill Graph", use_container_width=True, type="primary"):
 
                 with col1:
                     export_data = {
-                        "skills": skills,
-                        "total_skills": len(skills),
+                        "explicit_skills": skills,
+                        "total_explicit_skills": len(skills),
+                        "inferred_skills": inferred_skills,
+                        "total_inferred_skills": len(inferred_skills),
                         "graph_metrics": metrics,
                         "skills_by_category": skills_by_category,
                     }
 
                     if selected_role != "None":
                         export_data["job_role"] = selected_role
-                        export_data["matched_skills"] = list(matched_skills)
+                        export_data["explicit_matched_skills"] = list(explicit_matches)
+                        export_data["inferred_matched_skills"] = list(inferred_matches)
                         export_data["missing_skills"] = list(missing)
                         export_data["match_percentage"] = match_pct
 
@@ -357,10 +425,13 @@ if st.button("Generate Skill Graph", use_container_width=True, type="primary"):
                     )
 
                 with col2:
-                    csv_data = "Skill,Category,Confidence\n"
+                    csv_data = "Skill,Type,Category,Confidence,SupportingEvidence\n"
                     for skill, conf in confidence_scores:
                         cat = get_skill_category(skill)
-                        csv_data += f"{skill},{cat},{conf:.2f}\n"
+                        csv_data += f'"{skill}","explicit","{cat}",{conf:.2f},""\n'
+                    for inf in inferred_skills:
+                        ev_str = "; ".join(inf.get("evidence", []))
+                        csv_data += f'"{inf["skill"]}","inferred","{inf.get("category", "Other")}",{inf["confidence"]:.2f},"{ev_str}"\n'
 
                     st.download_button(
                         label="Download as CSV",
